@@ -2,10 +2,40 @@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-function Fnt($s) { try { $p = $s -split ','; $sz = [float]$p[1]; $st = if ($p[2] -eq "Bold") { [Drawing.FontStyle]::Bold } else { [Drawing.FontStyle]::Regular }; return New-Object Drawing.Font("Tahoma", $sz, $st) } catch { return New-Object Drawing.Font("Tahoma",9) } }
+# ===== Helper Functions =====
+function Fnt($s) { 
+    try { 
+        $p = $s -split ','; $sz = [float]$p[1]; 
+        $st = if ($p[2] -eq "Bold") { [Drawing.FontStyle]::Bold } else { [Drawing.FontStyle]::Regular }; 
+        return New-Object Drawing.Font("Tahoma", $sz, $st) 
+    } catch { return New-Object Drawing.Font("Tahoma",9) } 
+}
+
+# 强类型数组返回，确保即使只有1个文件或0个文件，遍历也不会出错
+function Get-DeepFiles($rootPath) {
+    $result = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($rootPath)
+    
+    while ($stack.Count -gt 0) {
+        $currentDir = $stack.Pop()
+        try {
+            $files = [System.IO.Directory]::GetFiles($currentDir, '*', [System.IO.SearchOption]::TopDirectoryOnly)
+            foreach ($f in $files) { $result.Add($f) }
+            
+            $dirs = [System.IO.Directory]::GetDirectories($currentDir, '*', [System.IO.SearchOption]::TopDirectoryOnly)
+            foreach ($d in $dirs) { $stack.Push($d) }
+        } catch {
+            # 忽略无权限错误，继续遍历其他目录
+        }
+    }
+    return $result.ToArray()
+}
 
 $script:lang = "zh"
 $script:rootDir = if ($PSCommandPath) { Split-Path $PSCommandPath -Parent } else { $PWD.Path }
@@ -20,7 +50,14 @@ function Find-SteamAuto {
     return ""
 }
 
-function Get-DirSize($p) { if (-not (Test-Path $p)) { return "0 B" }; $l = (Get-ChildItem $p -Recurse -File -EA 0 | Measure-Object -Property Length -Sum).Sum; if (-not $l) { return "0 B" }; if ($l -gt 1GB) { return "{0:N1} GB" -f ($l/1GB) }; if ($l -gt 1MB) { return "{0:N1} MB" -f ($l/1MB) }; if ($l -gt 1KB) { return "{0:N1} KB" -f ($l/1KB) }; return "$l B" }
+function Get-FileSize($p) { 
+    if (-not (Test-Path $p)) { return "0 B" }
+    $l = (Get-Item $p).Length
+    if ($l -gt 1GB) { return "{0:N1} GB" -f ($l/1GB) }
+    if ($l -gt 1MB) { return "{0:N1} MB" -f ($l/1MB) }
+    if ($l -gt 1KB) { return "{0:N1} KB" -f ($l/1KB) }
+    return "$l B" 
+}
 
 function Get-BackupZips {
     $root = Join-Path $script:rootDir "RimWorld_Backup"
@@ -30,12 +67,10 @@ function Get-BackupZips {
     $result = @()
     foreach ($z in $zips) {
         $size = Get-FileSize($z.FullName)
-        $result += New-Object PSObject -Property @{ Path = $z.FullName; Name = $z.BaseName; Size = $size; DisplayName = "$($z.BaseName)  -  $size" }
+        $result += New-Object PSObject -Property @{ Path = $z.FullName; Name = $z.BaseName; Size = $size; DisplayName = "$($z.BaseName) - $size" }
     }
     return $result
 }
-
-function Get-FileSize($p) { if (-not (Test-Path $p)) { return "0 B" }; $l = (Get-Item $p).Length; if ($l -gt 1GB) { return "{0:N1} GB" -f ($l/1GB) }; if ($l -gt 1MB) { return "{0:N1} MB" -f ($l/1MB) }; if ($l -gt 1KB) { return "{0:N1} KB" -f ($l/1KB) }; return "$l B" }
 
 function nlb($t,$x,$y,$s,$c) { $r = New-Object Windows.Forms.Label; $r.Text = $t; $r.Location = New-Object Drawing.Point($x,$y); $r.AutoSize = $true; if ($s) { try { $fs = [float]($s -split ',' | Select-Object -First 1); $fb = ($s -like "*Bold*"); $sty = if ($fb) { [Drawing.FontStyle]::Bold } else { [Drawing.FontStyle]::Regular }; $r.Font = New-Object Drawing.Font("Tahoma", $fs, $sty) } catch {} }; if ($c) { $r.ForeColor = $c }; return $r }
 function ncb($t,$x,$y) { $r = New-Object Windows.Forms.CheckBox; $r.Text = $t; $r.Size = New-Object Drawing.Size(310,22); $r.Location = New-Object Drawing.Point($x,$y); $r.Checked = $true; return $r }
@@ -43,55 +78,50 @@ function ntb($x,$y,$w) { $r = New-Object Windows.Forms.TextBox; $r.Size = New-Ob
 function nbb($t,$x,$y,$w,$h) { $r = New-Object Windows.Forms.Button; $r.Text = $t; if ($h) { $r.Size = New-Object Drawing.Size($w,$h) } else { $r.Size = New-Object Drawing.Size($w,25) }; $r.Location = New-Object Drawing.Point($x,$y); return $r }
 function ngb($t,$x,$y,$w,$h) { $r = New-Object Windows.Forms.GroupBox; $r.Text = " $t "; $r.Size = New-Object Drawing.Size($w,$h); $r.Location = New-Object Drawing.Point($x,$y); return $r }
 
-function Restore-FromZip($zipPath, $rw, $ad) {
-    if (-not (Test-Path $zipPath)) { throw "ZIP not found" }
-    $tmp = Join-Path $env:TEMP "RimWorldRestore_$(Get-Random)"
-    try {
-        $pbRs.Value = 10; $form.Refresh()
-        Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
-        $pbRs.Value = 30; $form.Refresh()
-        $cfgSrc = Join-Path $tmp "Config"
-        if (Test-Path $cfgSrc) {
-            if (Test-Path "$cfgSrc\ModsConfig.xml") { Copy-Item "$cfgSrc\ModsConfig.xml" "$ad\Config\" -Force }
-            if (Test-Path "$cfgSrc\Prefs.xml") { Copy-Item "$cfgSrc\Prefs.xml" "$ad\Config\" -Force }
-            if (Test-Path "$cfgSrc\KeyPrefs.xml") { Copy-Item "$cfgSrc\KeyPrefs.xml" "$ad\Config\" -Force }
-        }
-        $pbRs.Value = 50; $form.Refresh()
-        $svSrc = Join-Path $tmp "Saves"
-        if (Test-Path $svSrc) { foreach ($f in (Get-ChildItem $svSrc -Filter "*.rws" -File)) { Copy-Item $f.FullName "$ad\Saves\" -Force } }
-        $pbRs.Value = 70; $form.Refresh()
-        $lmSrc = Join-Path $tmp "LocalMods"
-        if (Test-Path $lmSrc) { foreach ($d in (Get-ChildItem $lmSrc -Directory)) {
-            if (Test-Path (Join-Path $d.FullName "About.xml")) { $md = "$rw\Mods\$($d.Name)\About"; New-Item $md -ItemType Directory -Force -EA 0 | Out-Null; Copy-Item (Join-Path $d.FullName "About.xml") "$md\" -Force }
-            if (Test-Path (Join-Path $d.FullName "PreviewImage.png")) { $md = "$rw\Mods\$($d.Name)\About"; New-Item $md -ItemType Directory -Force -EA 0 | Out-Null; Copy-Item (Join-Path $d.FullName "PreviewImage.png") "$md\" -Force }
-        }}
-        $pbRs.Value = 90; $form.Refresh()
-    } finally { Remove-Item $tmp -Recurse -Force -EA 0; $pbRs.Value = 100; $form.Refresh() }
-    return "OK"
-}
-
+# ===== Config Save/Load =====
 function Save-Cfg($sp, $opts, $lang) {
-    $x = '<?xml version="1.0"?><C><S>'+$sp+'</S><L>'+$lang+'</L><O>'
-    if ($opts.Contains('Config')) { $x+='<C/>' }; if ($opts.Contains('Saves')) { $x+='<S/>' }; if ($opts.Contains('Workshop')) { $x+='<W/>' }
-    if ($opts.Contains('LocalMods')) { $x+='<L/>' }; if ($opts.Contains('GameInfo')) { $x+='<G/>' }; if ($opts.Contains('Log')) { $x+='<P/>' }; if ($opts.Contains('Zip')) { $x+='<Z/>' }
-    $x+='</O></C>'
-    $x | Out-File $script:configFile -Encoding UTF8
+    $xml = New-Object System.Xml.XmlDocument
+    $root = $xml.CreateElement("C")
+    $xml.AppendChild($root)
+    $sNode = $xml.CreateElement("S"); $sNode.InnerText = $sp; $root.AppendChild($sNode)
+    $lNode = $xml.CreateElement("L"); $lNode.InnerText = $lang; $root.AppendChild($lNode)
+    $oNode = $xml.CreateElement("O"); $root.AppendChild($oNode)
+    if ($opts.Contains('Config')) { $oNode.AppendChild($xml.CreateElement("C")) | Out-Null }
+    if ($opts.Contains('Saves')) { $oNode.AppendChild($xml.CreateElement("S")) | Out-Null }
+    if ($opts.Contains('Workshop')) { $oNode.AppendChild($xml.CreateElement("W")) | Out-Null }
+    if ($opts.Contains('LocalMods')) { $oNode.AppendChild($xml.CreateElement("L")) | Out-Null }
+    if ($opts.Contains('GameInfo')) { $oNode.AppendChild($xml.CreateElement("G")) | Out-Null }
+    if ($opts.Contains('GameFiles')) { $oNode.AppendChild($xml.CreateElement("G2")) | Out-Null }
+    if ($opts.Contains('Log')) { $oNode.AppendChild($xml.CreateElement("P")) | Out-Null }
+    $xml.Save($script:configFile)
 }
 
 function Load-Cfg {
     if (-not (Test-Path $script:configFile)) { return $null }
-    try { $x = [xml](Get-Content $script:configFile -Raw -EA 0); if (-not $x) { return $null }
+    try { 
+        $x = [xml](Get-Content $script:configFile -Raw -EA 0); if (-not $x) { return $null }
         $o = New-Object Collections.ArrayList
-        if ($x.C.O.C) { $o.Add('Config')|Out-Null }; if ($x.C.O.S) { $o.Add('Saves')|Out-Null }; if ($x.C.O.W) { $o.Add('Workshop')|Out-Null }
-        if ($x.C.O.L) { $o.Add('LocalMods')|Out-Null }; if ($x.C.O.G) { $o.Add('GameInfo')|Out-Null }; if ($x.C.O.P) { $o.Add('Log')|Out-Null }; if ($x.C.O.Z) { $o.Add('Zip')|Out-Null }
+        if ($x.C.O.C) { $o.Add('Config')|Out-Null }
+        if ($x.C.O.S) { $o.Add('Saves')|Out-Null }
+        if ($x.C.O.W) { $o.Add('Workshop')|Out-Null }
+        if ($x.C.O.L) { $o.Add('LocalMods')|Out-Null }
+        if ($x.C.O.G) { $o.Add('GameInfo')|Out-Null }
+        if ($x.C.O.G2) { $o.Add('GameFiles')|Out-Null }
+        if ($x.C.O.P) { $o.Add('Log')|Out-Null }
         $l = if ($x.C.L) { $x.C.L } else { "zh" }
         return @{ SteamPath = $x.C.S; Language = $l; Options = $o }
     } catch { return $null }
 }
 
-# ===== Form =====
+# ===== Form Initialization =====
 $form = New-Object Windows.Forms.Form
-$form.Size = New-Object Drawing.Size(920,760); $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi; $form.StartPosition = "CenterScreen"; $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false; $form.Font = Fnt "Tahoma,9"; $form.BackColor = "#F0F0F5"
+$form.Size = New-Object Drawing.Size(920,760)
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedSingle"
+$form.MaximizeBox = $false
+$form.Font = Fnt "Tahoma,9"
+$form.BackColor = "#F0F0F5"
 $title = nlb "RimWorld Backup Tool" 20 15 "16,Bold" "#2D2D3C"; $form.Controls.Add($title)
 $sub = nlb "Backup and restore in one click." 22 48 "9" "Gray"; $form.Controls.Add($sub)
 
@@ -103,12 +133,13 @@ $chkLang.Size = New-Object Drawing.Size(80,22)
 $chkLang.Location = New-Object Drawing.Point(700, 15)
 $form.Controls.Add($chkLang)
 
-$tabControl = New-Object Windows.Forms.TabControl; $tabControl.Size = New-Object Drawing.Size(870,580); $tabControl.Location = New-Object Drawing.Point(20,75)
+$tabControl = New-Object Windows.Forms.TabControl
+$tabControl.Size = New-Object Drawing.Size(870,580)
+$tabControl.Location = New-Object Drawing.Point(20,75)
 $form.Controls.Add($tabControl)
 
-# ===== Tab 1 =====
+# ===== Tab 1: Backup =====
 $tab1 = New-Object Windows.Forms.TabPage; $tab1.Text = "1. Backup"; $tabControl.Controls.Add($tab1)
-
 $grpP = ngb "Steam Path" 10 10 830 65
 $lblP = nlb "Steam Library:" 15 28 "9"; $grpP.Controls.Add($lblP)
 $txtP = ntb 115 26 480; $grpP.Controls.Add($txtP)
@@ -117,7 +148,9 @@ $lblAuto = nlb "" 115 45 "8" "Gray"; $grpP.Controls.Add($lblAuto)
 $tab1.Controls.Add($grpP)
 
 $grpO = ngb "Backup Options" 10 85 830 165
-$chkC = ncb "Mod Config" 15 25; $chkS = ncb "Game Saves" 15 50; $chkW = ncb "Workshop Mods" 15 75
+$chkC = ncb "Mod Config" 15 25
+$chkS = ncb "Game Saves" 15 50
+$chkW = ncb "Workshop Mods" 15 75
 $chkL = ncb "Local Mods" 15 100
 $chkG = ncb "Game Info" 375 25
 $chkG2 = ncb "Game Files" 375 50; $chkG2.Checked = $true
@@ -128,17 +161,17 @@ $txtName = ntb 110 118 250; $txtName.Text = ""; $grpO.Controls.Add($txtName)
 $lblNameHint = nlb "leave empty for auto-name" 370 122 "8" "Gray"; $grpO.Controls.Add($lblNameHint)
 $tab1.Controls.Add($grpO)
 
-$btnBk = nbb "Start Backup" 15 265 160 40; $btnBk.Font = Fnt "Microsoft YaHei UI,11,Bold"; $btnBk.BackColor = "#4190F0"; $btnBk.ForeColor = "White"
+$btnBk = nbb "Start Backup" 15 265 160 40
+$btnBk.Font = Fnt "Microsoft YaHei UI,11,Bold"
+$btnBk.BackColor = "#4190F0"; $btnBk.ForeColor = "White"
 $tab1.Controls.Add($btnBk)
-
 $lblSt = nlb "" 15 320; $lblSt.ForeColor = "#009900"; $lblSt.Font = Fnt "Tahoma,9,Bold"; $tab1.Controls.Add($lblSt)
 $pb = New-Object Windows.Forms.ProgressBar
 $pb.Size = New-Object Drawing.Size(810,22); $pb.Location = New-Object Drawing.Point(15,345); $pb.Minimum = 0; $pb.Maximum = 100; $tab1.Controls.Add($pb)
 $lblDt = nlb "" 15 370; $lblDt.ForeColor = "Gray"; $lblDt.Font = Fnt "Tahoma,8"; $tab1.Controls.Add($lblDt)
 
-# ===== Tab 2 =====
+# ===== Tab 2: Restore =====
 $tab2 = New-Object Windows.Forms.TabPage; $tab2.Text = "2. Restore"; $tabControl.Controls.Add($tab2)
-
 $grpR = ngb "Select Backup" 10 10 840 360
 $lbZip = New-Object Windows.Forms.ListBox; $lbZip.Size = New-Object Drawing.Size(800,150); $lbZip.Location = New-Object Drawing.Point(15,25); $grpR.Controls.Add($lbZip)
 $lblNo = nlb "No backups found." 20 80 "8" "Gray"; $lblNo.Visible = $false; $grpR.Controls.Add($lblNo)
@@ -151,18 +184,28 @@ $pbRs = New-Object Windows.Forms.ProgressBar
 $pbRs.Size = New-Object Drawing.Size(800,20); $pbRs.Location = New-Object Drawing.Point(15,315); $pbRs.Minimum = 0; $pbRs.Maximum = 100; $pbRs.Value = 0; $grpR.Controls.Add($pbRs)
 $tab2.Controls.Add($grpR)
 $lblRs = nlb "" 15 390; $lblRs.ForeColor = "#006400"; $lblRs.Font = Fnt "Tahoma,10"; $tab2.Controls.Add($lblRs)
+
 $btnEx = nbb "Exit" 800 680 80 30; $form.Controls.Add($btnEx)
 
-# ===== Init =====
+# ===== Load Config =====
 $auto = Find-SteamAuto
 $cfg = Load-Cfg
-
-if ($cfg) { $txtP.Text = $cfg.SteamPath; if ($cfg.Language -eq "en") { $chkLang.SelectedIndex = 1; $script:lang = "en" }
-    $o = $cfg.Options; if ($o) { $chkC.Checked = $o.Contains('Config'); $chkS.Checked = $o.Contains('Saves'); $chkW.Checked = $o.Contains('Workshop'); $chkL.Checked = $o.Contains('LocalMods'); $chkG.Checked = $o.Contains('GameInfo'); $chkP.Checked = $o.Contains('Log') }
+if ($cfg) { 
+    $txtP.Text = $cfg.SteamPath
+    if ($cfg.Language -eq "en") { $chkLang.SelectedIndex = 1; $script:lang = "en" } 
+    $o = $cfg.Options
+    if ($o) { 
+        $chkC.Checked = $o.Contains('Config')
+        $chkS.Checked = $o.Contains('Saves')
+        $chkW.Checked = $o.Contains('Workshop')
+        $chkL.Checked = $o.Contains('LocalMods')
+        $chkG.Checked = $o.Contains('GameInfo')
+        $chkG2.Checked = $o.Contains('GameFiles')
+        $chkP.Checked = $o.Contains('Log') 
+    } 
 } elseif ($auto) { $txtP.Text = $auto }
 
-function Refresh-Lang {
-    $e = ($script:lang -eq "en")
+function Refresh-Lang { 
     $form.Text = L "RimWorld 备份还原工具" "RimWorld Backup Tool"
     $title.Text = L "RimWorld 备份还原工具" "RimWorld Backup Tool"
     $sub.Text = L "一键备份和还原" "Backup and restore in one click."
@@ -173,9 +216,9 @@ function Refresh-Lang {
     $btnBr.Text = L "浏览" "Browse"
     $grpO.Text = L " 备份内容 " " Options "
     $chkC.Text = L "Mod 配置 (ModsConfig.xml)" "Mod Config"
-    $chkS.Text = L "游戏存档 (.rws)" "Game Saves"
-    $chkW.Text = L "创意工坊 Mod" "Workshop Mods"
-    $chkL.Text = L "本地 Mod" "Local Mods"
+    $chkS.Text = L "游戏存档" "Game Saves"
+    $chkW.Text = L "创意工坊 Mod (完整文件)" "Workshop Mods (Full)"
+    $chkL.Text = L "本地 Mod (完整文件)" "Local Mods (Full)"
     $chkG.Text = L "游戏版本信息" "Game Info"
     $chkG2.Text = L "游戏安装文件" "Game Files"
     $chkP.Text = L "游戏日志" "Player.log"
@@ -188,144 +231,350 @@ function Refresh-Lang {
     $lblNameHint.Text = L "留空则自动命名" "leave empty for auto-name"
     $lblRPath.Text = L "备份文件：" "Backup ZIP:"
     $grpR.Text = L " 选择备份 " " Select Backup "
-    if ($auto) { $lblAuto.Text = L "已自动检测" "Auto-detected" }
-    else { $lblAuto.Text = L "请选择 Steam 路径" "Select Steam path" }
+    if ($auto) { $lblAuto.Text = L "已自动检测" "Auto-detected" } else { $lblAuto.Text = L "请选择 Steam 路径" "Select Steam path" }
     if ($txtP.Text -and (T $txtP.Text)) { $lblAuto.Text = L "路径有效" "Path OK" }
 }
 
-function Refresh-List {
+function Refresh-List { 
     $list = Get-BackupZips; $lbZip.Items.Clear()
-    if ($list.Count -eq 0) { $lblNo.Visible = $true; $btnRs.Enabled = $false; $txtRPath.Text = ""; $lblRInfo.Text = "" }
-    else { $lblNo.Visible = $false; foreach ($i in $list) { $lbZip.Items.Add($i.DisplayName) | Out-Null }; $lbZip.SelectedIndex = 0; $btnRs.Enabled = $true }
+    if ($list.Count -eq 0) { $lblNo.Visible = $true; $btnRs.Enabled = $false; $txtRPath.Text = ""; $lblRInfo.Text = "" } 
+    else { 
+        $lblNo.Visible = $false
+        foreach ($i in $list) { $lbZip.Items.Add($i.DisplayName) | Out-Null }
+        $lbZip.SelectedIndex = 0
+        $btnRs.Enabled = $true 
+    }
 }
 
 Refresh-Lang; Refresh-List
 
-# ===== Events =====
+# ===== UI Events =====
 $chkLang.Add_SelectedIndexChanged({ $script:lang = if ($chkLang.SelectedIndex -eq 1) { "en" } else { "zh" }; Refresh-Lang })
 
-$btnBr.Add_Click({
+$btnBr.Add_Click({ 
     $d = New-Object Windows.Forms.FolderBrowserDialog; $d.Description = L "选择 Steam 库目录" "Select Steam Library"
     $d.ShowNewFolderButton = $false
     if ($txtP.Text -and (Test-Path $txtP.Text)) { $d.SelectedPath = $txtP.Text }
-    if ($d.ShowDialog() -eq "OK") {
-        if (T $d.SelectedPath) { $txtP.Text = $d.SelectedPath; $lblAuto.Text = L "路径有效" "Path OK" }
+    if ($d.ShowDialog() -eq "OK") { 
+        if (T $d.SelectedPath) { $txtP.Text = $d.SelectedPath; $lblAuto.Text = L "路径有效" "Path OK" } 
         else { $msg = L "未找到 RimWorld，请选择包含 steamapps\common\RimWorld 的目录。" "RimWorld not found."; [Windows.Forms.MessageBox]::Show($msg, "Error", "OK", "Warning") }
     }
 })
 
 $btnEx.Add_Click({ $form.Close() })
 
+# ===== Backup Logic =====
 $btnBk.Add_Click({
-    $btnBk.Enabled = $false; $steam = $txtP.Text.Trim()
-    if (-not (T $steam)) {
-        $msg = L "请选择 Steam 路径。" "Select Steam path."
-        [Windows.Forms.MessageBox]::Show($msg, "Error", "OK", "Error")
-        $btnBk.Enabled = $true; return
-    }
-    $rw = "$steam\steamapps\common\RimWorld"; $ws = "$steam\steamapps\workshop\content\294100"
-    $ad = "$env:USERPROFILE\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios"
-    $bn = $txtName.Text.Trim()
-    if ($bn -eq "") { $bn = Get-Date -Format "yyyy-MM-dd_HH-mm-ss" }
-    $root = Join-Path $script:rootDir "RimWorld_Backup"
-    if (-not (Test-Path $root)) { New-Item $root -ItemType Directory | Out-Null }
-    $tmp = Join-Path $env:TEMP "RWBackup_$(Get-Random)"
-    New-Item $tmp -ItemType Directory -Force | Out-Null
-    $step = 0
-    $total = @($chkC,$chkS,$chkW,$chkL,$chkG,$chkG2,$chkP|Where-Object{$_.Checked}).Count; if ($total -eq 0) { $total = 1 }
-    function up($m,$p) { $lblSt.Text = $m; $pb.Value = [Math]::Min($p,99); $form.Refresh(); Start-Sleep -Milliseconds 20 }
-    function ud($m) { $lblDt.Text = $m; $form.Refresh(); Start-Sleep -Milliseconds 10 }
-
     try {
-        if ($chkC.Checked) { $step++; up(L "[1/6] Mod 配置..." "[1/6] Config...") ([math]::Round($step/$total*100))
-            $cd = "$ad\Config"; if (Test-Path $cd) { $d = "$tmp\Config"; New-Item $d -ItemType Directory -Force|Out-Null
-                Copy-Item "$cd\ModsConfig.xml","$cd\Prefs.xml","$cd\KeyPrefs.xml" "$d\" -Force -EA 0; ud "OK" } }
-        if ($chkS.Checked) { $step++; up(L "[2/6] 存档..." "[2/6] Saves...") ([math]::Round($step/$total*100))
-            $sd = "$ad\Saves"; if (Test-Path $sd) { $d = "$tmp\Saves"; New-Item $d -ItemType Directory -Force|Out-Null
-                foreach ($f in (Get-ChildItem $sd -Filter "*.rws" -File)) { Copy-Item $f.FullName "$d\" -Force }; ud "OK: $(@(Get-ChildItem $sd -Filter '*.rws' -File).Count)" } }
-        if ($chkW.Checked) { $step++; up(L "[3/6] 创意工坊 Mod..." "[3/6] Workshop...") ([math]::Round($step/$total*100))
-            if (Test-Path $ws) { $d = "$tmp\Workshop"; New-Item $d -ItemType Directory -Force|Out-Null; $ds = Get-ChildItem $ws -Directory; $t = $ds.Count; $i = 0
-                foreach ($m in $ds) { $i++; $md = Join-Path $d $m.Name; New-Item $md -ItemType Directory -Force|Out-Null
-                    if (Test-Path (Join-Path $m.FullName "About\About.xml")) { Copy-Item (Join-Path $m.FullName "About\About.xml") "$md\" -Force }
-                    if ($i % 30 -eq 0 -or $i -eq $t) { ud "$i/$t" } }; ud "OK: $t" } }
-        if ($chkL.Checked) { $step++; up(L "[4/6] 本地 Mod..." "[4/6] Local mods...") ([math]::Round($step/$total*100))
-            $lm = "$rw\Mods"; if (Test-Path $lm) { $d = "$tmp\LocalMods"; New-Item $d -ItemType Directory -Force|Out-Null
-                $ds = Get-ChildItem $lm -Directory|Where-Object{$_.Name -ne "Place mods here.txt"}; $t = $ds.Count; $i = 0
-                foreach ($m in $ds) { $i++; $md = Join-Path $d $m.Name; New-Item $md -ItemType Directory -Force|Out-Null
-                    if (Test-Path (Join-Path $m.FullName "About\About.xml")) { Copy-Item (Join-Path $m.FullName "About\About.xml") "$md\" -Force }
-                    if ($i % 10 -eq 0 -or $i -eq $t) { ud "$i/$t" } }; ud "OK: $t" } }
-        if ($chkG.Checked) { $step++; up(L "[5/6] 游戏信息..." "[5/6] Game info...") ([math]::Round($step/$total*100))
-            $d = "$tmp\GameInfo"; New-Item $d -ItemType Directory -Force|Out-Null
-            if (Test-Path "$rw\Version.txt") { Copy-Item "$rw\Version.txt" "$d\" -Force }
-            Copy-Item "$rw\LoadFolders.xml" "$d\" -Force -EA 0
-            $vf = "$rw\RimWorldWin64_Data\Managed\Assembly-CSharp.dll"
-            if (Test-Path $vf) { (Get-Item $vf).VersionInfo.FileVersion | Out-File "$d\Version.txt" -Encoding UTF8 }; ud "OK" }
-        if ($chkP.Checked) { $step++; up(L "[6/7] 日志..." "[6/7] Player.log...") ([math]::Round($step/$total*100))
-            if (Test-Path "$ad\Player.log") { $d = "$tmp\Logs"; New-Item $d -ItemType Directory -Force|Out-Null; Copy-Item "$ad\Player.log" "$d\" -Force; ud "OK" } }
-        if ($chkG2.Checked) { $step++; up(L "[7/7] 游戏本体..." "[7/7] Game files...") ([math]::Round($step/$total*100))
-            $rw2 = "$steam\steamapps\common\RimWorld"; if (Test-Path $rw2) { $d = "$tmp\GameFiles"; New-Item $d -ItemType Directory -Force|Out-Null
-                Copy-Item "$rw2\Version.txt" "$d" -Force -EA 0
-                Copy-Item "$rw2\*.dll" "$d" -Force -EA 0; Copy-Item "$rw2\*.exe" "$d" -Force -EA 0
-                Copy-Item "$rw2\*.cfg" "$d" -Force -EA 0; Copy-Item "$rw2\*.txt" "$d" -Force -EA 0
-                Copy-Item "$rw2\LoadFolders.xml" "$d" -Force -EA 0
-                if (Test-Path "$rw2\Data") { Copy-Item "$rw2\Data" "$d" -Recurse -Force -EA 0 }
-                if (Test-Path "$rw2\RimWorldWin64_Data") { Copy-Item "$rw2\RimWorldWin64_Data\Managed\*" "$d\Managed" -Recurse -Force -EA 0 }
-                ud "OK" } }
-
-        up(L "压缩中..." "Compressing...") 95
+        $btnBk.Enabled = $false
+        $form.Refresh()
+        
+        $steam = $txtP.Text.Trim()
+        if (-not (T $steam)) { 
+            $msg = L "请选择 Steam 路径。" "Select Steam path."
+            [Windows.Forms.MessageBox]::Show($msg, "Error", "OK", "Error")
+            $btnBk.Enabled = $true; return
+        }
+        
+        $bn = $txtName.Text.Trim()
+        if ($bn -eq "") { $bn = Get-Date -Format "yyyy-MM-dd_HH-mm-ss" }
+        $root = Join-Path $script:rootDir "RimWorld_Backup"
+        if (-not (Test-Path $root)) { New-Item $root -ItemType Directory | Out-Null }
+        
         $zf = "$root\$bn.zip"
-        Compress-Archive -Path "$tmp\*" -DestinationPath $zf -CompressionLevel Optimal -Force
-        Remove-Item $tmp -Recurse -Force -EA 0
+        if (Test-Path $zf) {
+            $confirm = L "备份文件 '$bn.zip' 已存在，是否覆盖？" "Backup '$bn.zip' already exists. Overwrite?"
+            if ([Windows.Forms.MessageBox]::Show($confirm, "Confirm", "YesNo", "Warning") -ne "Yes") { 
+                $btnBk.Enabled = $true; return 
+            }
+            Remove-Item $zf -Force
+        }
+        
+        $opts = New-Object Collections.ArrayList
+        if ($chkC.Checked) { $opts.Add('Config')|Out-Null }
+        if ($chkS.Checked) { $opts.Add('Saves')|Out-Null }
+        if ($chkW.Checked) { $opts.Add('Workshop')|Out-Null }
+        if ($chkL.Checked) { $opts.Add('LocalMods')|Out-Null }
+        if ($chkG.Checked) { $opts.Add('GameInfo')|Out-Null }
+        if ($chkG2.Checked) { $opts.Add('GameFiles')|Out-Null }
+        if ($chkP.Checked) { $opts.Add('Log')|Out-Null }
+        Save-Cfg $steam $opts $script:lang
+        
+        $isEn = ($script:lang -eq "en")
+        $rw = "$steam\steamapps\common\RimWorld"
+        $ws = "$steam\steamapps\workshop\content\294100"
+        $ad = "$env:USERPROFILE\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios"
+        
+        $pb.Value = 0; $lblDt.Text = ""
+        $totalFiles = 0
+        
+        try {
+            $zip = [System.IO.Compression.ZipFile]::Open($zf, [System.IO.Compression.ZipArchiveMode]::Create)
+            
+            # 1. Config
+            if ($chkC.Checked -and (Test-Path "$ad\Config")) {
+                $lblSt.Text = if ($isEn) { "Config..." } else { "配置..." }; [System.Windows.Forms.Application]::DoEvents()
+                Get-ChildItem "$ad\Config" -Filter "*.xml" -File -EA 0 | ForEach-Object {
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, "Config/$($_.Name)", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                    $totalFiles++
+                }
+            }
+            # 2. Saves
+            if ($chkS.Checked -and (Test-Path "$ad\Saves")) {
+                $lblSt.Text = if ($isEn) { "Saves..." } else { "存档..." }; [System.Windows.Forms.Application]::DoEvents()
+                Get-ChildItem "$ad\Saves" -Filter "*.rws" -File -EA 0 | ForEach-Object {
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, "Saves/$($_.Name)", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                    $totalFiles++
+                }
+            }
+            # 3. Logs
+            if ($chkP.Checked -and (Test-Path "$ad\Player.log")) {
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, "$ad\Player.log", "Logs/Player.log", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                $totalFiles++
+            }
+            # 4. GameInfo
+            if ($chkG.Checked -and (Test-Path $rw)) {
+                foreach ($f in @('Version.txt','LoadFolders.xml')) {
+                    $fp = Join-Path $rw $f
+                    if (Test-Path $fp) { 
+                        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fp, "GameInfo/$f", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                        $totalFiles++
+                    }
+                }
+                $vf = Join-Path $rw "RimWorldWin64_Data\Managed\Assembly-CSharp.dll"
+                if (Test-Path $vf) {
+                    $verText = (Get-Item $vf).VersionInfo.FileVersion
+                    $tmpVer = Join-Path $env:TEMP "rw_ver.txt"
+                    $verText | Out-File $tmpVer -Encoding UTF8
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $tmpVer, "GameInfo/Version.txt", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                    Remove-Item $tmpVer -Force -EA 0
+                    $totalFiles++
+                }
+            }
+            
+            # 5. Workshop
+            if ($chkW.Checked -and (Test-Path $ws)) {
+                $lblSt.Text = if ($isEn) { "Workshop Mods..." } else { "工坊 Mod..." }
+                $mods = Get-ChildItem $ws -Directory -EA 0
+                $t = $mods.Count; $i = 0
+                if ($t -gt 0) {
+                    foreach ($mod in $mods) {
+                        $i++
+                        $pb.Value = [math]::Round(($i/$t)*50)
+                        $lblDt.Text = "$i / $t"
+                        [System.Windows.Forms.Application]::DoEvents()
+                        
+                        $modPath = $mod.FullName.TrimEnd('\')
+                        $files = Get-DeepFiles $modPath
+                        foreach ($f in $files) {
+                            $rel = $f.Substring($modPath.Length).TrimStart('\').Replace('\','/')
+                            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f, "Workshop/$($mod.Name)/$rel", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                            $totalFiles++
+                        }
+                    }
+                }
+            }
+            $pb.Value = 50; [System.Windows.Forms.Application]::DoEvents()
 
-        $pb.Value = 100; $lblSt.Text = L "备份完成!" "Done!"
-        $lblDt.Text = "$zf"; Refresh-List
-        $msg = L "备份完成!" "Done!"
-        [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Information")
-    } catch { $lblSt.Text = "Error"; $lblDt.Text = "$_"; [Windows.Forms.MessageBox]::Show("$_","Error","OK","Error") }
-    finally { $btnBk.Enabled = $true }
+            # 6. LocalMods
+            if ($chkL.Checked -and (Test-Path "$rw\Mods")) {
+                $lblSt.Text = if ($isEn) { "Local Mods..." } else { "本地 Mod..." }
+                $mods = Get-ChildItem "$rw\Mods" -Directory -EA 0 | Where-Object { $_.Name -ne 'Place mods here.txt' }
+                $t = $mods.Count; $i = 0
+                if ($t -gt 0) {
+                    foreach ($mod in $mods) {
+                        $i++
+                        $pb.Value = 50 + [math]::Round(($i/$t)*40)
+                        $lblDt.Text = "$i / $t"
+                        [System.Windows.Forms.Application]::DoEvents()
+                        
+                        $modPath = $mod.FullName.TrimEnd('\')
+                        $files = Get-DeepFiles $modPath
+                        foreach ($f in $files) {
+                            $rel = $f.Substring($modPath.Length).TrimStart('\').Replace('\','/')
+                            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f, "LocalMods/$($mod.Name)/$rel", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                            $totalFiles++
+                        }
+                    }
+                }
+            }
+            $pb.Value = 90; [System.Windows.Forms.Application]::DoEvents()
+
+            # 7. GameFiles
+            if ($chkG2.Checked -and (Test-Path $rw)) {
+                $lblSt.Text = if ($isEn) { "Game Files..." } else { "游戏文件..." }
+                [System.Windows.Forms.Application]::DoEvents()
+                
+                $gameFilesList = New-Object System.Collections.Generic.List[string]
+                foreach ($dirName in @('Data','RimWorldWin64_Data')) {
+                    $dirPath = Join-Path $rw $dirName
+                    if (Test-Path $dirPath -PathType Container) {
+                        $deepFiles = Get-DeepFiles $dirPath
+                        foreach ($df in $deepFiles) { $gameFilesList.Add($df) }
+                    }
+                }
+                foreach ($fileName in @('Version.txt','LoadFolders.xml')) {
+                    $filePath = Join-Path $rw $fileName
+                    if (Test-Path $filePath -PathType Leaf) { $gameFilesList.Add($filePath) }
+                }
+                foreach ($pattern in @('*.dll','*.exe','*.cfg','*.txt')) {
+                    Get-ChildItem -Path $rw -Filter $pattern -File -EA 0 | ForEach-Object { $gameFilesList.Add($_.FullName) }
+                }
+                
+                $t = $gameFilesList.Count; $i = 0
+                $rwClean = $rw.TrimEnd('\')
+                foreach ($fPath in $gameFilesList) {
+                    $i++
+                    $pb.Value = 90 + [math]::Round(($i/$t)*10)
+                    $lblDt.Text = "$i / $t"
+                    [System.Windows.Forms.Application]::DoEvents()
+                    
+                    $rel = $fPath.Substring($rwClean.Length).TrimStart('\').Replace('\','/')
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fPath, "GameFiles/$rel", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+                    $totalFiles++
+                }
+            }
+            
+            $zip.Dispose()
+            
+            # === 0 文件拦截 ===
+            if ($totalFiles -eq 0) {
+                if (Test-Path $zf) { Remove-Item $zf -Force }
+                $lblSt.Text = L "未找到文件" "No files found"
+                $msg = L "未扫描到任何文件！请检查 Steam 路径是否正确，或勾选了要备份的内容。" "No files found! Check paths and options."
+                [Windows.Forms.MessageBox]::Show($msg, "Warning", "OK", "Warning")
+            } else {
+                $pb.Value = 100; $lblSt.Text = L "备份完成!" "Done!"; $lblDt.Text = $zf
+                Refresh-List
+                $msg = L "备份完成!`n共备份 $totalFiles 个文件。`n文件路径：`n$zf" "Done!`n$totalFiles files saved.`nSaved to:`n$zf"
+                [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Information")
+            }
+        } catch {
+            $lblSt.Text = "Error"; $lblDt.Text = $_.Exception.Message
+            [Windows.Forms.MessageBox]::Show("备份失败，错误信息：`n$($_.Exception.Message)", "Error", "OK", "Error")
+        } finally {
+            $btnBk.Enabled = $true
+        }
+    } catch {
+        $btnBk.Enabled = $true
+        [Windows.Forms.MessageBox]::Show("点击备份时发生错误: $($_.Exception.Message)", "Error", "OK", "Error")
+    }
+})
+
+# ===== Restore Logic =====
+$btnRs.Add_Click({
+    try {
+        if ($lbZip.SelectedIndex -lt 0) { 
+            $msg = L "请选择备份。" "Select a backup."
+            [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Warning"); return
+        }
+        
+        $backups = Get-BackupZips
+        $sel = $backups | Where-Object { $_.DisplayName -eq $lbZip.Items[$lbZip.SelectedIndex] } | Select-Object -First 1
+        if (-not $sel) { 
+            $msg = L "备份列表为空" "No backups found"
+            [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Warning"); return
+        }
+        
+        $steam = $txtP.Text.Trim()
+        if (-not (T $steam)) { 
+            $msg = L "请设置 Steam 路径。" "Set Steam path first."
+            [Windows.Forms.MessageBox]::Show($msg, "Error", "OK", "Error"); return
+        }
+        
+        $confirmMsg = L "还原: $($sel.Name)`n确定继续?" "Restore: $($sel.Name)`nContinue?"
+        if ([Windows.Forms.MessageBox]::Show($confirmMsg, "Confirm", "YesNo", "Warning") -ne "Yes") { return }
+        
+        $btnRs.Enabled = $false
+        $lblRs.Text = L "还原中..." "Restoring..."
+        $pbRs.Value = 0
+        $form.Refresh()
+        
+        $isEn = ($script:lang -eq "en")
+        $rw = "$steam\steamapps\common\RimWorld"
+        $ws = "$steam\steamapps\workshop\content\294100"
+        $ad = "$env:USERPROFILE\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios"
+        
+        try {
+            $lblRs.Text = if ($isEn) { "Extracting files..." } else { "解压文件中..." }
+            [System.Windows.Forms.Application]::DoEvents()
+            
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($sel.Path)
+            $t = $archive.Entries.Count; $i = 0
+            $successCount = 0
+            $failCount = 0
+            
+            foreach ($entry in $archive.Entries) {
+                $i++
+                # 统一替换为反斜杠，确保 StartsWith 匹配稳健
+                $entryName = $entry.FullName.Replace('/', '\')
+                $destPath = ""
+                
+                if ($entryName.StartsWith("Config\")) { $destPath = Join-Path "$ad\Config" $entryName.Substring(7) }
+                elseif ($entryName.StartsWith("Saves\")) { $destPath = Join-Path "$ad\Saves" $entryName.Substring(6) }
+                elseif ($entryName.StartsWith("Workshop\")) { $destPath = Join-Path $ws $entryName.Substring(9) }
+                elseif ($entryName.StartsWith("LocalMods\")) { $destPath = Join-Path "$rw\Mods" $entryName.Substring(10) }
+                elseif ($entryName.StartsWith("GameInfo\")) { $destPath = Join-Path $rw $entryName.Substring(9) }
+                elseif ($entryName.StartsWith("Logs\")) { $destPath = Join-Path $ad $entryName.Substring(5) }
+                elseif ($entryName.StartsWith("GameFiles\")) { $destPath = Join-Path $rw $entryName.Substring(10) }
+                
+                # 如果匹配到了路径，且不是目录条目
+                if ($destPath -ne "" -and -not $entryName.EndsWith('\')) {
+                    try {
+                        $dir = Split-Path $destPath -Parent
+                        if ($dir -and -not (Test-Path $dir)) { New-Item $dir -ItemType Directory -Force | Out-Null }
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+                        $successCount++
+                    } catch {
+                        $failCount++
+                    }
+                }
+                
+                if ($i % 20 -eq 0 -or $i -eq $t) { 
+                    $pbRs.Value = [math]::Round(($i/$t)*100)
+                    $lblRs.Text = if ($isEn) { "Restoring $i/$t..." } else { "还原 $i/$t..." }
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+            $archive.Dispose()
+            
+            $pbRs.Value = 100
+            $lblRs.Text = L "还原完成! 重启游戏生效。" "Done! Restart game to apply."
+            $msgDone = L "还原完成!" "Done!"
+            if ($failCount -gt 0) {
+                $msgDone = L "还原完成! 成功 $successCount 个，失败 $failCount 个 (可能被占用)。" "Done! $successCount ok, $failCount failed."
+            } else {
+                $msgDone = L "还原完成! 共还原 $successCount 个文件。" "Done! $successCount files restored."
+            }
+            [Windows.Forms.MessageBox]::Show($msgDone, "OK", "OK", "Information")
+        } catch {
+            $errMsg = $_.Exception.Message
+            if ($errMsg -match "being used by another process" -or $errMsg -match "正由另一进程使用") {
+                $lblRs.Text = L "错误：请先关闭游戏！" "Error: Close game first!"
+                [Windows.Forms.MessageBox]::Show((L "文件被占用，请确保 RimWorld 游戏已完全关闭！" "File in use. Ensure RimWorld is closed!"), "Error", "OK", "Warning")
+            } else {
+                $lblRs.Text = "Error"
+                [Windows.Forms.MessageBox]::Show("还原失败，错误信息：`n$errMsg", "Error", "OK", "Error")
+            }
+        } finally {
+            $btnRs.Enabled = $true
+        }
+    } catch {
+        $btnRs.Enabled = $true
+        [Windows.Forms.MessageBox]::Show("点击还原时发生错误: $($_.Exception.Message)", "Error", "OK", "Error")
+    }
 })
 
 $btnRef.Add_Click({ Refresh-List })
-$lbZip.Add_SelectedIndexChanged({
+
+$lbZip.Add_SelectedIndexChanged({ 
     $btnRs.Enabled = ($lbZip.SelectedIndex -ge 0)
     $selItem = $lbZip.SelectedItem
-    if ($selItem) {
+    if ($selItem) { 
         $list = Get-BackupZips
         $sel = $list | Where-Object { $_.DisplayName -eq $selItem } | Select-Object -First 1
         if ($sel) { $txtRPath.Text = $sel.Path; $lblRInfo.Text = L "文件大小: $($sel.Size)" "Size: $($sel.Size)" }
     }
-})
-
-$btnRs.Add_Click({
-    try {
-        if ($lbZip.SelectedIndex -lt 0) {
-            $msg = L "请选择备份。" "Select a backup."
-            [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Warning"); return
-        }
-        $selPath = $lbZip.Items[$lbZip.SelectedIndex]
-        # get corresponding backup
-        $backups = Get-BackupZips
-        $sel = $null
-        foreach ($b in $backups) { if ($b.DisplayName -eq $selPath) { $sel = $b; break } }
-        if (-not $sel) {
-            $msg = L "备份列表为空" "No backups found"
-            [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Warning"); return
-        }
-        $steam = $txtP.Text.Trim()
-        if (-not (T $steam)) {
-            $msg = L "请设置 Steam 路径。" "Set Steam path first."
-            [Windows.Forms.MessageBox]::Show($msg, "Error", "OK", "Error"); return
-        }
-        $confirmMsg = L "还原: $($sel.Name)`n确定继续?" "Restore: $($sel.Name)`nContinue?"
-        if ([Windows.Forms.MessageBox]::Show($confirmMsg, "Confirm", "YesNo", "Warning") -ne "Yes") { return }
-        $btnRs.Enabled = $false; $lblRs.Text = L "还原中..." "Restoring..."
-        $form.Refresh()
-        Restore-FromZip -zipPath $sel.Path -rw "$steam\steamapps\common\RimWorld" -ad "$env:USERPROFILE\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios"
-        $lblRs.Text = L "还原完成! 重启游戏生效。" "Done! Restart game to apply."
-        $msg = L "还原完成!" "Done!"
-        [Windows.Forms.MessageBox]::Show($msg, "OK", "OK", "Information")
-    } catch { $lblRs.Text = "Error"; [Windows.Forms.MessageBox]::Show("$_","Error","OK","Error") }
-    finally { $btnRs.Enabled = $true }
 })
 
 $form.ShowDialog() | Out-Null
